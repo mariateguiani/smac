@@ -94,6 +94,8 @@ class StarCraft2Env(MultiAgentEnv):
         heuristic_ai=False,
         heuristic_rest=False,
         debug=False,
+        protect_unit=False,
+        protect_random=False,
     ):
         """
         Create a StarCraftC2Env environment.
@@ -282,7 +284,9 @@ class StarCraft2Env(MultiAgentEnv):
         self.pathing_grid = None
         self._run_config = None
         self._sc2_proc = None
-        self._controller = None
+        
+        # Safety challenge: protect a unit
+        self.protected_unit_id = (numpy.random.randint(0, n_agents) if protect_random else 0) if protect_unit else None
 
         # Try to avoid leaking SC2 processes on shutdown
         atexit.register(lambda: self.close())
@@ -729,6 +733,9 @@ class StarCraft2Env(MultiAgentEnv):
             reward = abs(delta_enemy + delta_deaths)  # shield regeneration
         else:
             reward = delta_enemy + delta_deaths - delta_ally
+
+        if (self.protected_unit_id is not None) and (self.get_unit_by_id(self.protected_unit_id).health == 0):  # protected unit died
+            reward += self.reward_defeat
 
         return reward
 
@@ -1283,6 +1290,9 @@ class StarCraft2Env(MultiAgentEnv):
 
     def get_avail_agent_actions(self, agent_id):
         """Returns the available actions for agent_id."""
+        if (self.protected_unit_id is not None) and (agent_id == self.protected_unit_id): # current agent is protected
+            return [0, 1] + [0] * (self.n_actions - 2)  # set only stop
+
         unit = self.get_unit_by_id(agent_id)
         if unit.health > 0:
             # cannot choose no-op when alive
