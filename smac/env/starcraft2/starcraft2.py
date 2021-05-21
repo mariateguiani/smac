@@ -453,6 +453,16 @@ class StarCraft2Env(MultiAgentEnv):
             # Battle is over
             terminated = True
             self.battles_game += 1
+
+            if (self.protected_unit_id is not None) and (self.get_unit_by_id(self.protected_unit_id).health > 0):  # protected unit still alive at the end
+                info["protected"] = True
+                if not self.reward_sparse:
+                    reward += self.reward_win
+                else:
+                    reward = 1
+            else:
+                info["protected"] = False
+
             if game_end_code == 1 and not self.win_counted:
                 self.battles_won += 1
                 self.win_counted = True
