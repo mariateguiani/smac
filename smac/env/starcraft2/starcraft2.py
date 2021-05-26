@@ -96,6 +96,7 @@ class StarCraft2Env(MultiAgentEnv):
         debug=False,
         protect_unit=False,
         protect_random=False,
+        protect_easy=False,
     ):
         """
         Create a StarCraftC2Env environment.
@@ -287,6 +288,8 @@ class StarCraft2Env(MultiAgentEnv):
         
         # Safety challenge: protect a unit
         self.protected_unit_id = (numpy.random.randint(0, n_agents) if protect_random else 0) if protect_unit else None
+        self.protect_easy = protect_easy
+        self.protected_health_status = 0
 
         # Try to avoid leaking SC2 processes on shutdown
         atexit.register(lambda: self.close())
@@ -454,7 +457,8 @@ class StarCraft2Env(MultiAgentEnv):
             terminated = True
             self.battles_game += 1
 
-            if (self.protected_unit_id is not None) and (self.get_unit_by_id(self.protected_unit_id).health > 0):  # protected unit still alive at the end
+            # Check if the protected unit is still alive at the end
+            if (self.protected_unit_id is not None) and (self.get_unit_by_id(self.protected_unit_id).health > 0):
                 info["protected"] = True
                 if not self.reward_sparse:
                     reward += self.reward_win
@@ -744,8 +748,20 @@ class StarCraft2Env(MultiAgentEnv):
         else:
             reward = delta_enemy + delta_deaths - delta_ally
 
-        if (self.protected_unit_id is not None) and (self.get_unit_by_id(self.protected_unit_id).health == 0):  # protected unit died
-            reward += self.reward_defeat
+        # For the protecc challenge - easy mode
+        # Reward changes to protected unit health status
+        if self.protect_easy:
+            if self.previous_ally_units[self.protected_unit_id].health < self.get_unit_by_id(self.protected_unit_id).health:
+                # healed
+                reward += self.reward_death_value
+            elif self.previous_ally_units[self.protected_unit_id].health > self.get_unit_by_id(self.protected_unit_id).health:
+                # damaged
+                reward -= self.reward_death_value
+
+        # Check if the protected unit died
+        # The reward is scaled to reward keeping the unit alive for longer
+        if (self.protected_unit_id is not None) and (self.get_unit_by_id(self.protected_unit_id).health == 0):
+            reward += self.reward_defeat * (1 - self._episode_steps / self.episode_limit)
 
         return reward
 
@@ -1300,8 +1316,8 @@ class StarCraft2Env(MultiAgentEnv):
 
     def get_avail_agent_actions(self, agent_id):
         """Returns the available actions for agent_id."""
-        if (self.protected_unit_id is not None) and (agent_id == self.protected_unit_id): # current agent is protected
-            return [0, 1] + [0] * (self.n_actions - 2)  # set only stop
+        # if (self.protected_unit_id is not None) and (agent_id == self.protected_unit_id): # current agent is protected
+        #     return [0, 1] + [0] * (self.n_actions - 2)  # set only stop
 
         unit = self.get_unit_by_id(agent_id)
         if unit.health > 0:
