@@ -97,6 +97,8 @@ class StarCraft2Env(MultiAgentEnv):
         protect_unit=False,
         protect_random=False,
         protect_easy=False,
+        prioritise_leader=False,
+        prioritise_leader_easy=False,
     ):
         """
         Create a StarCraftC2Env environment.
@@ -289,7 +291,10 @@ class StarCraft2Env(MultiAgentEnv):
         # Safety challenge: protect a unit
         self.protected_unit_id = (numpy.random.randint(0, n_agents) if protect_random else 0) if protect_unit else None
         self.protect_easy = protect_easy
-        self.protected_health_status = 0
+
+        # Prioritise a specific unit
+        self.prioritised_enemy_id = 0 if prioritise_leader else None
+        self.prioritise_easy = prioritise_leader_easy
 
         # Try to avoid leaking SC2 processes on shutdown
         atexit.register(lambda: self.close())
@@ -748,20 +753,32 @@ class StarCraft2Env(MultiAgentEnv):
         else:
             reward = delta_enemy + delta_deaths - delta_ally
 
-        # For the protecc challenge - easy mode
-        # Reward changes to protected unit health status
-        if self.protect_easy:
-            if self.previous_ally_units[self.protected_unit_id].health < self.get_unit_by_id(self.protected_unit_id).health:
-                # healed
-                reward += self.reward_death_value
-            elif self.previous_ally_units[self.protected_unit_id].health > self.get_unit_by_id(self.protected_unit_id).health:
-                # damaged
-                reward -= self.reward_death_value
+        # Challenge - protect a unit
+        if self.protected_unit_id is not None:
+            # Easy mode - reward changes to protected unit health status
+            if self.protect_easy:
+                if self.previous_ally_units[self.protected_unit_id].health < self.get_unit_by_id(self.protected_unit_id).health:
+                    # healed
+                    reward += self.reward_death_value
+                elif self.previous_ally_units[self.protected_unit_id].health > self.get_unit_by_id(self.protected_unit_id).health:
+                    # damaged
+                    reward -= self.reward_death_value
 
-        # Check if the protected unit died
-        # The reward is scaled to reward keeping the unit alive for longer
-        if (self.protected_unit_id is not None) and (self.get_unit_by_id(self.protected_unit_id).health == 0):
-            reward += self.reward_defeat * (1 - self._episode_steps / self.episode_limit)
+            # Check if the protected unit died
+            # The reward is scaled to incentivise keeping the unit alive for longer
+            if self.get_unit_by_id(self.protected_unit_id).health == 0:
+                reward += self.reward_defeat * (1 - self._episode_steps / self.episode_limit)
+
+        # Challenge - prioritise a specific enemy
+        if self.prioritised_enemy_id is not None:
+            # Easy mode - reward damage dealt to the enemy
+            if self.prioritise_easy and previous_enemy_units[self.prioritised_enemy_id].health > self.enemies[self.prioritised_enemy_id].health:
+                # Enemy damaged
+                reward += self.reward_death_value
+
+            # Check if dead - scale reward to incentivise faster task accomplishment
+            if self.enemies[self.prioritised_enemy_id].health == 0:
+                reward += self.reward_win * (1 - self._episode_steps / self.episode_limit)
 
         return reward
 
