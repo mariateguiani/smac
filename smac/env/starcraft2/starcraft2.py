@@ -99,6 +99,8 @@ class StarCraft2Env(MultiAgentEnv):
         protect_easy=False,
         prioritise_leader=False,
         prioritise_leader_easy=False,
+        prioritise_type=None,
+        prioritise_type_easy=False,
     ):
         """
         Create a StarCraftC2Env environment.
@@ -295,6 +297,10 @@ class StarCraft2Env(MultiAgentEnv):
         # Prioritise a specific unit
         self.prioritised_enemy_id = 0 if prioritise_leader else None
         self.prioritise_easy = prioritise_leader_easy
+
+        # Prioritise a specific type of unit
+        self.prioritise_type = prioritise_type
+        self.prioritise_type_easy = prioritise_type_easy
 
         # Try to avoid leaking SC2 processes on shutdown
         atexit.register(lambda: self.close())
@@ -735,6 +741,7 @@ class StarCraft2Env(MultiAgentEnv):
                         prev_health - al_unit.health - al_unit.shield
                     )
 
+        prio_type_id = self.get_priorised_type()
         for e_id, e_unit in self.enemies.items():
             if not self.death_tracker_enemy[e_id]:
                 prev_health = (
@@ -747,6 +754,14 @@ class StarCraft2Env(MultiAgentEnv):
                     delta_enemy += prev_health
                 else:
                     delta_enemy += prev_health - e_unit.health - e_unit.shield
+                
+                # Challenge - prioritise a specific enemy unit type
+                if (self.prioritise_type is not None) and (prio_type_id == self.get_unit_type_id(e_unit, False)):
+                    if e_unit.health == 0:
+                        reward += self.reward_death_value
+                    elif self.prioritise_type_easy and prev_health > e_unit.health:
+                        # damaged
+                        reward += self.reward_death_value /2
 
         if self.reward_only_positive:
             reward = abs(delta_enemy + delta_deaths)  # shield regeneration
@@ -772,7 +787,7 @@ class StarCraft2Env(MultiAgentEnv):
         # Challenge - prioritise a specific enemy
         if self.prioritised_enemy_id is not None:
             # Easy mode - reward damage dealt to the enemy
-            if self.prioritise_easy and previous_enemy_units[self.prioritised_enemy_id].health > self.enemies[self.prioritised_enemy_id].health:
+            if self.prioritise_easy and self.previous_enemy_units[self.prioritised_enemy_id].health > self.enemies[self.prioritised_enemy_id].health:
                 # Enemy damaged
                 reward += self.reward_death_value
 
@@ -1330,7 +1345,32 @@ class StarCraft2Env(MultiAgentEnv):
                     type_id = 2
 
         return type_id
-
+    
+    # For the challenge where we prioritise a type of enemy unit
+    # The ids are all 0 in init, so we call this when needed
+    def get_priorised_type(self):
+        if self.prioritise_type == "marine":
+            return self.marine_id
+        elif self.prioritise_type == "marauder":
+            return self.marauder_id
+        elif self.prioritise_type == "medivac":
+            return self.medivac_id
+        elif self.prioritise_type == "hydralisk":
+            return self.hydralisk_id
+        elif self.prioritise_type == "zergling":
+            return self.zergling_id
+        elif self.prioritise_type == "baneling":
+            return self.baneling_id
+        elif self.prioritise_type == "stalker":
+            return self.stalker_id
+        elif self.prioritise_type == "colossus":
+            return self.colossus_id
+        elif self.prioritise_type == "zealot":
+            return self.zealot_id
+        else:
+            logging.debug("NO SUCH UNIT")
+            return -1
+        
     def get_avail_agent_actions(self, agent_id):
         """Returns the available actions for agent_id."""
         # if (self.protected_unit_id is not None) and (agent_id == self.protected_unit_id): # current agent is protected
