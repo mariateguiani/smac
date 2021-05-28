@@ -101,6 +101,8 @@ class StarCraft2Env(MultiAgentEnv):
         prioritise_leader_easy=False,
         prioritise_type=None,
         prioritise_type_easy=False,
+        advance=False,
+        advance_easy=False,
     ):
         """
         Create a StarCraftC2Env environment.
@@ -302,6 +304,11 @@ class StarCraft2Env(MultiAgentEnv):
         self.prioritise_type = prioritise_type
         self.prioritise_type_easy = prioritise_type_easy
 
+        # Advance past enemy lines
+        self.advance_past = 3/4 if advance else None
+        self.advance_easy = advance_easy
+        self.units_ids_past_line = []
+
         # Try to avoid leaking SC2 processes on shutdown
         atexit.register(lambda: self.close())
 
@@ -378,6 +385,9 @@ class StarCraft2Env(MultiAgentEnv):
 
         if self.heuristic_ai:
             self.heuristic_targets = [None] * self.n_agents
+
+        # Information for challenges
+        self.units_ids_past_line = []
 
         try:
             self._obs = self._controller.observe()
@@ -740,8 +750,22 @@ class StarCraft2Env(MultiAgentEnv):
                     delta_ally += neg_scale * (
                         prev_health - al_unit.health - al_unit.shield
                     )
-
-        prio_type_id = self.get_priorised_type()
+            
+            # Challenge - advance past enemy lines
+            # Reward only first time past line - avoid reward gaming
+            if self.advance_past is not None:
+                if al_id not in self.units_ids_past_line:
+                    if (self.previous_ally_units[al_id].pos.x < self.map_x * self.advance_past and
+                            al_unit.pos.x >= self.map_x * self.advance_past):
+                        # arrived past line
+                        reward += self.reward_death_value
+                        self.units_ids_past_line.append(al_id)
+                    elif self.advance_easy and self.previous_ally_units[al_id].pos.x < al_unit.pos.x:
+                        # Easy mode - went in the right direction
+                        reward += self.reward_death_value / 2
+        
+        if self.prioritise_type is not None:
+            prio_type_id = self.get_priorised_type()
         for e_id, e_unit in self.enemies.items():
             if not self.death_tracker_enemy[e_id]:
                 prev_health = (
@@ -795,6 +819,11 @@ class StarCraft2Env(MultiAgentEnv):
             if self.enemies[self.prioritised_enemy_id].health == 0:
                 reward += self.reward_win * (1 - self._episode_steps / self.episode_limit)
 
+        # Challenge - advance past enemy lines
+        # Reward if every agent got past the line
+        if self.advance_past is not None and len(self.units_ids_past_line) + sum(self.death_tracker_ally) >= self.n_agents:
+            reward += self.reward_win
+        
         return reward
 
     def get_total_actions(self):
@@ -1549,6 +1578,11 @@ class StarCraft2Env(MultiAgentEnv):
             return 1  # won
         if n_ally_alive == 0 and n_enemy_alive == 0:
             return 0
+        
+        # Challenge - advance past enemy lines
+        # Alternative way to win - get all past the line
+        if self.advance_past is not None and len(self.units_ids_past_line) >= n_ally_alive:
+            return 1
 
         return None
 
