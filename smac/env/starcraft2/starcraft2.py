@@ -97,6 +97,8 @@ class StarCraft2Env(MultiAgentEnv):
         protect_unit=False,
         protect_random=False,
         protect_easy=False,
+        protect_type=None,
+        protect_type_easy=False,
         prioritise_leader=False,
         prioritise_leader_easy=False,
         prioritise_type=None,
@@ -295,9 +297,16 @@ class StarCraft2Env(MultiAgentEnv):
         self._sc2_proc = None
         
         # CHALLENGES
+        self.total_intermediate_reward = self.n_enemies * self.reward_death_value
+        self.heights = set([])
+        
         # Protect a unit
         self.protected_unit_id = (numpy.random.randint(0, n_agents) if protect_random else 0) if protect_unit else None
         self.protect_easy = protect_easy
+
+        # Protect a type of units
+        self.protect_type = protect_type
+        self.protect_type_easy = protect_type_easy
 
         # Prioritise a specific unit
         self.prioritised_enemy_id = 0 if prioritise_leader else None
@@ -308,13 +317,13 @@ class StarCraft2Env(MultiAgentEnv):
         self.prioritise_type_easy = prioritise_type_easy
 
         # Advance past enemy lines
-        self.advance_past = 3/4 if advance else None
+        self.advance_past = 3/4 if advance else -1
         self.advance_easy = advance_easy
         self.units_ids_past_line = []
 
         # Advance one
         self.advance_unit_id = 0 if advance_one else None
-        self.advance_one_past = 3/4 if advance_one else None
+        self.advance_one_past = 3/4 if advance_one else -1
         self.advance_one_easy = advance_one_easy
         self.advance_done = False
 
@@ -396,14 +405,55 @@ class StarCraft2Env(MultiAgentEnv):
         if self.heuristic_ai:
             self.heuristic_targets = [None] * self.n_agents
 
-        # Information for challenges
-        self.units_ids_past_line = []
-
         try:
             self._obs = self._controller.observe()
             self.init_units()
         except (protocol.ProtocolError, protocol.ConnectionError):
             self.full_restart()
+
+
+        # Challenge - info for advancing all units past line
+        self.units_ids_past_line = []
+
+        # Challenge
+        self.protect_type_id = (self.get_challenge_type_id(True) - self._min_unit_type) if self.protect_type is not None else None
+        self.prioritise_type_id = (self.get_challenge_type_id(False) - self._min_unit_type) if self.prioritise_type is not None else None
+
+        # Challenge - values for equalizing intermediate rewards for tasks (easy mode)
+        self.reward_per_hp_prot_one = self.total_intermediate_reward / self.get_unit_by_id(self.protected_unit_id).health if self.protect_easy else None
+        
+        self.reward_per_hp_prio_one = self.total_intermediate_reward / self.get_unit_by_id(self.prioritised_enemy_id).health if self.prioritise_easy else None
+
+        self.protect_type_death_count = 0
+        if self.protect_type_easy:
+            self.n_prot_type = 0
+            prot_type_health = 0
+            for al_id, al_unit in self.agents.items():
+                if self.get_unit_type_id(al_unit, True) == self.protect_type_id:
+                    self.n_prot_type += 1
+                    prot_type_health = al_unit.health
+            if self.n_prot_type == 0:
+                logging.debug("NO SUCH UNIT: {}".format(self.protect_type))
+            self.reward_per_hp_prot_type = self.total_intermediate_reward / self.n_prot_type / prot_type_health
+
+        self.prioritise_type_death_count = 0
+        if self.prioritise_type_easy:
+            self.n_prio_type = 0
+            prio_type_health = 0
+            for e_id, e_unit in self.enemies.items():
+                if self.get_unit_type_id(e_unit, False) == self.prioritise_type_id:
+                    self.n_prio_type += 1
+                    prio_type_health = e_unit.health
+            if self.n_prio_type == 0:
+                logging.debug("NO SUCH UNIT: {}".format(self.prioritise_type))
+            self.reward_per_hp_prio_type = self.total_intermediate_reward / self.n_prio_type / prio_type_health
+
+        if self.advance_easy:
+            self.rewards_per_step = [self.total_intermediate_reward / self.n_agents / np.abs(al_unit.pos.x - self.map_x * self.advance_past) for al_id, al_unit in self.agents.items()]
+        
+        if self.advance_one_easy:
+            self.reward_per_step_one = self.total_intermediate_reward / np.abs(self.get_unit_by_id(self.advance_unit_id).pos.x - self.map_x * self.advance_one_past)
+
 
         if self.debug:
             logging.debug("Started Episode {}"
@@ -488,15 +538,58 @@ class StarCraft2Env(MultiAgentEnv):
             terminated = True
             self.battles_game += 1
 
-            # Check if the protected unit is still alive at the end
-            if (self.protected_unit_id is not None) and (self.get_unit_by_id(self.protected_unit_id).health > 0):
-                info["protected"] = True
-                if not self.reward_sparse:
-                    reward += self.reward_win
+            # Challenge - log if the protected unit is still alive at the end
+            if self.protected_unit_id is not None:
+                if self.get_unit_by_id(self.protected_unit_id).health > 0:
+                    info["protect_one"] = True
+                    if not self.reward_sparse:
+                        reward += self.reward_win
+                    else:
+                        reward = 1
                 else:
-                    reward = 1
-            else:
-                info["protected"] = False
+                    info["protect_one"] = False
+            # Challenge - log if the prioritised unit is defeated at the end
+            if self.prioritised_enemy_id is not None:
+                if self.enemies[self.prioritised_enemy_id].health == 0:
+                    info["prio_one"] = True
+                else:
+                    info["prio_one"] = False
+                    reward += self.reward_defeat
+            # Challenge - log if protected type units are alive
+            if self.protect_type is not None:
+                if self.protect_type_death_count < self.n_prot_type:
+                    info["protect_type"] = True
+                    if not self.reward_sparse:
+                        reward += self.reward_win
+                    else:
+                        reward = 1
+                else:
+                    info["protect_type"] = False
+            # Challenge - log if prioritised type enemy units are defeated
+            if self.prioritise_type is not None:
+                if self.prioritise_type_death_count == self.n_prio_type:
+                    info["prioritise_type"] = True
+                else:
+                    info["prioritise_type"] = False
+                    reward += self.reward_defeat
+
+            # Challenge - log if all past line
+            if self.advance_past != -1:
+                if len(self.units_ids_past_line) + sum(self.death_tracker_ally) >= self.n_agents:
+                    # all past line
+                    info["advance"] = True
+                else:
+                    info["advance"] = False
+                    reward += self.reward_defeat
+
+            # Challenge - log if one past line
+            if self.advance_unit_id is not None:
+                if self.advance_done:
+                    info["advance_one"] = True
+                else:
+                    info["advance_one"] = False
+                    reward += self.reward_defeat
+
 
             if game_end_code == 1 and not self.win_counted:
                 self.battles_won += 1
@@ -741,6 +834,7 @@ class StarCraft2Env(MultiAgentEnv):
 
         neg_scale = self.reward_negative_scale
 
+
         # update deaths
         for al_id, al_unit in self.agents.items():
             if not self.death_tracker_ally[al_id]:
@@ -760,22 +854,32 @@ class StarCraft2Env(MultiAgentEnv):
                     delta_ally += neg_scale * (
                         prev_health - al_unit.health - al_unit.shield
                     )
-            
-            # Challenge - advance past enemy lines
-            # Reward only first time past line - avoid reward gaming
-            if self.advance_past is not None:
-                if al_id not in self.units_ids_past_line:
-                    if (self.previous_ally_units[al_id].pos.x < self.map_x * self.advance_past and
-                            al_unit.pos.x >= self.map_x * self.advance_past):
-                        # arrived past line
-                        reward += self.reward_death_value
-                        self.units_ids_past_line.append(al_id)
-                    elif self.advance_easy and self.previous_ally_units[al_id].pos.x < al_unit.pos.x:
-                        # Easy mode - went in the right direction
-                        reward += self.reward_death_value / 2
-        
-        if self.prioritise_type is not None:
-            prio_type_id = self.get_priorised_type()
+
+                # Challenge - protect a type of units
+                # Only check for units not previously dead
+                if (self.protect_type is not None and
+                        self.protect_type_id == self.get_unit_type_id(al_unit, True)):
+                    if al_unit.health == 0:
+                        self.protect_type_death_count += 1
+                        reward -= self.reward_death_value
+                    elif self.protect_type_easy and prev_health > al_unit.health:
+                        # Easy mode - reward for damage to the prioritised units
+                        reward += self.reward_per_hp_prot_type * (prev_health - al_unit.health)
+
+                # Challenge - advance all past enemy lines
+                # Only check for units not previously dead
+                # Reward only first time past line (avoids reward gaming)
+                if self.advance_past != -1:
+                    if al_id not in self.units_ids_past_line:
+                        if (self.previous_ally_units[al_id].pos.x < self.map_x * self.advance_past and
+                                al_unit.pos.x >= self.map_x * self.advance_past):
+                            # arrived past line
+                            reward += self.reward_death_value
+                            self.units_ids_past_line.append(al_id)
+                        elif self.advance_easy and self.previous_ally_units[al_id].pos.x < al_unit.pos.x:
+                            # Easy mode - went in the right direction
+                            reward += self.rewards_per_step[al_id] * np.abs(self.previous_ally_units[al_id].pos.x - al_unit.pos.x)
+
         for e_id, e_unit in self.enemies.items():
             if not self.death_tracker_enemy[e_id]:
                 prev_health = (
@@ -790,12 +894,14 @@ class StarCraft2Env(MultiAgentEnv):
                     delta_enemy += prev_health - e_unit.health - e_unit.shield
                 
                 # Challenge - prioritise a specific enemy unit type
-                if (self.prioritise_type is not None) and (prio_type_id == self.get_unit_type_id(e_unit, False)):
+                if (self.prioritise_type is not None and 
+                        self.prioritise_type_id == self.get_unit_type_id(e_unit, False)):
                     if e_unit.health == 0:
+                        self.prioritise_type_death_count += 1
                         reward += self.reward_death_value
                     elif self.prioritise_type_easy and prev_health > e_unit.health:
-                        # damaged
-                        reward += self.reward_death_value /2
+                        # Easy mode - reward for damage to the prioritised units
+                        reward += self.reward_per_hp_prio_type * (prev_health - e_unit.health)
 
         if self.reward_only_positive:
             reward = abs(delta_enemy + delta_deaths)  # shield regeneration
@@ -806,12 +912,13 @@ class StarCraft2Env(MultiAgentEnv):
         if self.protected_unit_id is not None:
             # Easy mode - reward changes to protected unit health status
             if self.protect_easy:
-                if self.previous_ally_units[self.protected_unit_id].health < self.get_unit_by_id(self.protected_unit_id).health:
+                health_delta = self.previous_ally_units[self.protected_unit_id].health - self.get_unit_by_id(self.protected_unit_id).health
+                if health_delta < 0:
                     # healed
-                    reward += self.reward_death_value
-                elif self.previous_ally_units[self.protected_unit_id].health > self.get_unit_by_id(self.protected_unit_id).health:
+                    reward += np.abs(health_delta) * self.reward_per_hp_prot_one
+                elif health_delta > 0:
                     # damaged
-                    reward -= self.reward_death_value
+                    reward -= np.abs(health_delta) * self.reward_per_hp_prot_one
 
             # Check if the protected unit died
             # The reward is scaled to incentivise keeping the unit alive for longer
@@ -821,30 +928,46 @@ class StarCraft2Env(MultiAgentEnv):
         # Challenge - prioritise a specific enemy
         if self.prioritised_enemy_id is not None:
             # Easy mode - reward damage dealt to the enemy
-            if self.prioritise_easy and self.previous_enemy_units[self.prioritised_enemy_id].health > self.enemies[self.prioritised_enemy_id].health:
+            health_delta = self.previous_enemy_units[self.prioritised_enemy_id].health - self.enemies[self.prioritised_enemy_id].health
+            if self.prioritise_easy and health_delta > 0:
                 # Enemy damaged
-                reward += self.reward_death_value
+                reward += np.abs(health_delta) * self.reward_per_hp_prio_one
 
             # Check if dead - scale reward to incentivise faster task accomplishment
             if self.enemies[self.prioritised_enemy_id].health == 0:
                 reward += self.reward_win * (1 - self._episode_steps / self.episode_limit)
 
-        # Challenge - advance past enemy lines
+        # Challenge - protect a type of units
+        # Reward defeat if all dead
+        # The reward is scaled to incentivise keeping the units alive for longer
+        if self.protect_type is not None and self.protect_type_death_count == self.n_prot_type:
+            reward += self.reward_defeat * (1 - self._episode_steps / self.episode_limit)
+
+        # Challenge - prioritise a type of enemy units
+        # Reward win if all dead
+        # The reward is scaled to incentivise finishing the challenge faster
+        if self.prioritise_type is not None and self.prioritise_type_death_count == self.n_prio_type:
+            reward += self.reward_win * (1 - self._episode_steps / self.episode_limit)        
+
+        # Challenge - advance all past enemy lines
         # Reward if every agent got past the line (scale reward wrt time)
-        if self.advance_past is not None and len(self.units_ids_past_line) + sum(self.death_tracker_ally) >= self.n_agents:
+        if (self.advance_past != -1 and 
+                len(self.units_ids_past_line) + sum(self.death_tracker_ally) >= self.n_agents):
             reward += self.reward_win * (1 - self._episode_steps / self.episode_limit)
 
         # Challenge - advance one unit past enemy lines
         # Reward only the first time past the line (and scale reward wrt time)
         if self.advance_unit_id is not None and (not self.advance_done):
-            if (self.previous_ally_units[self.advance_unit_id].pos.x < self.map_x * self.advance_past and
-                    self.get_unit_by_id(self.advance_unit_id).pos.x >= self.map_x * self.advance_past):
+            curr_unit_pos = self.get_unit_by_id(self.advance_unit_id).pos.x
+            prev_unit_pos = self.previous_ally_units[self.advance_unit_id].pos.x
+            if (prev_unit_pos < self.map_x * self.advance_one_past and
+                    curr_unit_pos >= self.map_x * self.advance_one_past):
                 # arrived past line
                 reward += self.reward_win * (1 - self._episode_steps / self.episode_limit)
                 self.advance_done = True
-            elif self.advance_easy and self.previous_ally_units[self.advance_unit_id].pos.x < self.get_unit_by_id(self.advance_unit_id).pos.x:
-                # Easy mode - went in the right direction
-                reward += self.reward_death_value / 2
+            elif self.advance_one_easy and prev_unit_pos < curr_unit_pos:
+                # Easy mode - went in the right direction (right)
+                reward += self.reward_per_step_one * np.abs(prev_unit_pos - curr_unit_pos)
         
         return reward
 
@@ -958,6 +1081,8 @@ class StarCraft2Env(MultiAgentEnv):
             self.terrain_height[x, y] if self.check_bounds(x, y) else 1
             for x, y in points
         ]
+        self.heights.update(set(vals))
+        # print("heights", self.heights)
         return vals
 
     def get_obs_agent(self, agent_id):
@@ -1397,26 +1522,26 @@ class StarCraft2Env(MultiAgentEnv):
 
         return type_id
     
-    # For the challenge where we prioritise a type of enemy unit
-    # The ids are all 0 in init, so we call this when needed
-    def get_priorised_type(self):
-        if self.prioritise_type == "marine":
+    # Challenge - used to initialise the id of the protected/ prioritised type of unit
+    def get_challenge_type_id(self, prot):
+        find_type = self.protect_type if prot else self.prioritise_type
+        if find_type == "marine":
             return self.marine_id
-        elif self.prioritise_type == "marauder":
+        elif find_type == "marauder":
             return self.marauder_id
-        elif self.prioritise_type == "medivac":
+        elif find_type == "medivac":
             return self.medivac_id
-        elif self.prioritise_type == "hydralisk":
+        elif find_type == "hydralisk":
             return self.hydralisk_id
-        elif self.prioritise_type == "zergling":
+        elif find_type == "zergling":
             return self.zergling_id
-        elif self.prioritise_type == "baneling":
+        elif find_type == "baneling":
             return self.baneling_id
-        elif self.prioritise_type == "stalker":
+        elif find_type == "stalker":
             return self.stalker_id
-        elif self.prioritise_type == "colossus":
+        elif find_type == "colossus":
             return self.colossus_id
-        elif self.prioritise_type == "zealot":
+        elif find_type == "zealot":
             return self.zealot_id
         else:
             logging.debug("NO SUCH UNIT")
@@ -1605,7 +1730,7 @@ class StarCraft2Env(MultiAgentEnv):
         
         # Challenge - advance past enemy lines
         # Alternative way to win - get all past the line
-        if self.advance_past is not None and len(self.units_ids_past_line) >= n_ally_alive:
+        if self.advance_past != -1 and len(self.units_ids_past_line) >= n_ally_alive:
             return 1
 
         return None
