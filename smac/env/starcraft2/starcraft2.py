@@ -107,6 +107,8 @@ class StarCraft2Env(MultiAgentEnv):
         advance_easy=False,
         advance_one=False,
         advance_one_easy=False,
+        maze=False,
+        maze_easy=False,
     ):
         """
         Create a StarCraftC2Env environment.
@@ -327,6 +329,11 @@ class StarCraft2Env(MultiAgentEnv):
         self.advance_one_easy = advance_one_easy
         self.advance_done = False
 
+        # Maze
+        self.maze = maze
+        self.maze_easy = maze_easy
+        self.units_ids_at_goal = []
+
 
         # Try to avoid leaking SC2 processes on shutdown
         atexit.register(lambda: self.close())
@@ -412,10 +419,8 @@ class StarCraft2Env(MultiAgentEnv):
             self.full_restart()
 
 
-        # Challenge - info for advancing all units past line
+        # Challenge - info for challenges
         self.units_ids_past_line = []
-
-        # Challenge
         self.protect_type_id = (self.get_challenge_type_id(True) - self._min_unit_type) if self.protect_type is not None else None
         self.prioritise_type_id = (self.get_challenge_type_id(False) - self._min_unit_type) if self.prioritise_type is not None else None
 
@@ -453,6 +458,13 @@ class StarCraft2Env(MultiAgentEnv):
         
         if self.advance_one_easy:
             self.reward_per_step_one = self.total_intermediate_reward / np.abs(self.get_unit_by_id(self.advance_unit_id).pos.x - self.map_x * self.advance_one_past)
+
+        if self.maze:
+            # Assume bottom right corner
+            self.maze_goal_x = self.enemies[0].pos.x + 0.5
+            self.maze_goal_y = self.enemies[0].pos.y - 0.5
+            if self.maze_easy:
+                self.maze_rewards_per_step = [self.total_intermediate_reward / self.n_agents / self.distance(al_unit.pos.x, al_unit.pos.y, self.maze_goal_x, self.maze_goal_y) for al_id, al_unit in self.agents.items()]
 
 
         if self.debug:
@@ -879,6 +891,18 @@ class StarCraft2Env(MultiAgentEnv):
                         elif self.advance_easy and self.previous_ally_units[al_id].pos.x < al_unit.pos.x:
                             # Easy mode - went in the right direction
                             reward += self.rewards_per_step[al_id] * np.abs(self.previous_ally_units[al_id].pos.x - al_unit.pos.x)
+
+                # Challenge - maze, go to location guarded by the enemy team
+                if self.maze:
+                    if al_id not in self.units_ids_at_goal:
+                        prev_dist = self.distance(self.previous_ally_units[al_id].pos.x, self.previous_ally_units[al_id].pos.y, self.maze_goal_x, self.maze_goal_y)
+                        curr_dist = self.distance(al_unit.pos.x, al_unit.pos.y, self.maze_goal_x, self.maze_goal_y)
+                        if (al_unit.pos.x > self.maze_goal_x and al_unit.pos.y < self.maze_goal_y):
+                            reward += self.reward_death_value
+                            self.units_ids_at_goal.append(al_id)
+                        elif (self.maze_easy and prev_dist > curr_dist):
+                            reward += self.maze_rewards_per_step * (prev_dist - curr_dist)
+
 
         for e_id, e_unit in self.enemies.items():
             if not self.death_tracker_enemy[e_id]:
